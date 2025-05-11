@@ -1,0 +1,307 @@
+// ChatBot.h
+#pragma once
+#include <string>
+#include <vector>
+#include <memory>
+#include "APIClient.h"
+
+class ChatBot {
+private:
+    std::unique_ptr<APIClient> apiClient;
+    std::vector<std::pair<std::string, std::string>> chatHistory;
+    std::string botName;
+
+public:
+    ChatBot(const std::string& name = "C++ Bot");
+    ~ChatBot();
+
+    void setAPIClient(std::unique_ptr<APIClient> client);
+    std::string processMessage(const std::string& userMessage);
+    const std::vector<std::pair<std::string, std::string>>& getHistory() const;
+    void clearHistory();
+    std::string getBotName() const;
+};
+
+// APIClient.h
+#pragma once
+#include <string>
+#include <curl/curl.h>
+
+class APIClient {
+private:
+    std::string apiKey;
+    std::string apiEndpoint;
+    static size_t WriteCallback(void* contents, size_t size, size_t nmemb, std::string* output);
+
+public:
+    APIClient(const std::string& endpoint, const std::string& key);
+    ~APIClient();
+    std::string sendRequest(const std::string& message);
+};
+
+// ChatbotGUI.h
+#pragma once
+#include <FL/Fl.H>
+#include <FL/Fl_Window.H>
+#include <FL/Fl_Text_Display.H>
+#include <FL/Fl_Text_Buffer.H>
+#include <FL/Fl_Input.H>
+#include <FL/Fl_Button.H>
+#include <FL/Fl_Box.H>
+#include <memory>
+#include "ChatBot.h"
+
+class ChatbotGUI {
+private:
+    std::unique_ptr<Fl_Window> window;
+    Fl_Text_Display* chatDisplay;
+    Fl_Text_Buffer* chatBuffer;
+    Fl_Input* inputField;
+    Fl_Button* sendButton;
+    Fl_Button* clearButton;
+    Fl_Box* titleBox;
+
+    std::unique_ptr<ChatBot> chatbot;
+
+    static void sendCallback(Fl_Widget* w, void* data);
+    static void clearCallback(Fl_Widget* w, void* data);
+
+    void appendMessage(const std::string& sender, const std::string& message);
+    void updateChat();
+
+public:
+    ChatbotGUI(int w, int h, const char* title);
+    ~ChatbotGUI();
+
+    void show();
+    void setChatbot(std::unique_ptr<ChatBot> bot);
+};
+
+// ChatBot.cpp
+#include "ChatBot.h"
+#include <sstream>
+
+ChatBot::ChatBot(const std::string& name) : botName(name) {}
+ChatBot::~ChatBot() {}
+
+void ChatBot::setAPIClient(std::unique_ptr<APIClient> client) {
+    apiClient = std::move(client);
+}
+
+std::string ChatBot::processMessage(const std::string& userMessage) {
+    chatHistory.push_back({"User", userMessage});
+    std::string response = "Unable to get response.";
+
+    if (apiClient) {
+        response = apiClient->sendRequest(userMessage);
+    }
+
+    chatHistory.push_back({botName, response});
+    return response;
+}
+
+const std::vector<std::pair<std::string, std::string>>& ChatBot::getHistory() const {
+    return chatHistory;
+}
+
+void ChatBot::clearHistory() {
+    chatHistory.clear();
+}
+
+std::string ChatBot::getBotName() const {
+    return botName;
+}
+
+// APIClient.cpp
+#include "APIClient.h"
+#include <iostream>
+
+size_t APIClient::WriteCallback(void* contents, size_t size, size_t nmemb, std::string* output) {
+    size_t totalSize = size * nmemb;
+    output->append((char*)contents, totalSize);
+    return totalSize;
+}
+
+APIClient::APIClient(const std::string& endpoint, const std::string& key)
+    : apiEndpoint(endpoint), apiKey(key) {
+    curl_global_init(CURL_GLOBAL_ALL);
+}
+
+APIClient::~APIClient() {
+    curl_global_cleanup();
+}
+
+std::string APIClient::sendRequest(const std::string& message) {
+    CURL* curl = curl_easy_init();
+    std::string response;
+
+    if (curl) {
+        struct curl_slist* headers = NULL;
+        headers = curl_slist_append(headers, ("Authorization: Bearer " + apiKey).c_str());
+        headers = curl_slist_append(headers, "Content-Type: application/json");
+
+        std::string payload =
+            "{\"model\": \"gpt-3.5-turbo\", \"messages\": [{\"role\": \"user\", \"content\": \"" + message + "\"}]}";
+
+        curl_easy_setopt(curl, CURLOPT_URL, apiEndpoint.c_str());
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload.c_str());
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+
+        CURLcode res = curl_easy_perform(curl);
+
+        if (res != CURLE_OK) {
+            response = "Error: " + std::string(curl_easy_strerror(res));
+        }
+
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+    }
+
+    // Simplified parsing - in production use a JSON parser
+    std::string marker = "\"content\":\"";
+    size_t pos = response.find(marker);
+    if (pos != std::string::npos) {
+        size_t start = pos + marker.length();
+        size_t end = response.find("\"", start);
+        if (end != std::string::npos) {
+            return response.substr(start, end - start);
+        }
+    }
+
+    return response;
+}
+
+// ChatbotGUI.cpp
+#include "ChatbotGUI.h"
+#include <FL/fl_draw.H>
+
+ChatbotGUI::ChatbotGUI(int w, int h, const char* title) {
+    window = std::make_unique<Fl_Window>(w, h, title);
+    window->color(fl_rgb_color(240, 248, 255));
+    window->begin();
+
+    titleBox = new Fl_Box(20, 10, w - 40, 40, "ChatGPT C++ Bot");
+    titleBox->box(FL_UP_BOX);
+    titleBox->labelfont(FL_BOLD + FL_ITALIC);
+    titleBox->labelsize(24);
+    titleBox->labelcolor(FL_DARK_BLUE);
+
+    chatBuffer = new Fl_Text_Buffer();
+    chatDisplay = new Fl_Text_Display(20, 60, w - 40, h - 160);
+    chatDisplay->buffer(chatBuffer);
+    chatDisplay->textfont(FL_COURIER);
+    chatDisplay->textsize(14);
+    chatDisplay->color(FL_WHITE);
+    chatDisplay->box(FL_DOWN_BOX);
+
+    inputField = new Fl_Input(20, h - 80, w - 180, 30, "Message:");
+    inputField->textsize(14);
+    inputField->callback(sendCallback, this);
+
+    sendButton = new Fl_Button(w - 150, h - 80, 60, 30, "Send");
+    sendButton->callback(sendCallback, this);
+    sendButton->color(FL_GREEN);
+
+    clearButton = new Fl_Button(w - 80, h - 80, 60, 30, "Clear");
+    clearButton->callback(clearCallback, this);
+    clearButton->color(FL_RED);
+
+    window->end();
+    window->resizable(chatDisplay);
+}
+
+ChatbotGUI::~ChatbotGUI() {
+    delete chatBuffer;
+}
+
+void ChatbotGUI::show() {
+    window->show();
+}
+
+void ChatbotGUI::setChatbot(std::unique_ptr<ChatBot> bot) {
+    chatbot = std::move(bot);
+    if (chatbot) {
+        titleBox->copy_label(("ChatGPT C++ Bot: " + chatbot->getBotName()).c_str());
+    }
+}
+
+void ChatbotGUI::sendCallback(Fl_Widget*, void* data) {
+    ChatbotGUI* gui = static_cast<ChatbotGUI*>(data);
+    std::string message = gui->inputField->value();
+    if (!message.empty() && gui->chatbot) {
+        gui->appendMessage("You", message);
+        gui->inputField->value("");
+        std::string response = gui->chatbot->processMessage(message);
+        gui->appendMessage(gui->chatbot->getBotName(), response);
+    }
+}
+
+void ChatbotGUI::clearCallback(Fl_Widget*, void* data) {
+    ChatbotGUI* gui = static_cast<ChatbotGUI*>(data);
+    gui->chatBuffer->text("");
+    if (gui->chatbot) {
+        gui->chatbot->clearHistory();
+    }
+}
+
+void ChatbotGUI::appendMessage(const std::string& sender, const std::string& message) {
+    chatBuffer->append((sender + ": " + message + "\n\n").c_str());
+    chatDisplay->insert_position(chatBuffer->length());
+    chatDisplay->show_insert_position();
+}
+
+void ChatbotGUI::updateChat() {
+    if (!chatbot) return;
+    chatBuffer->text("");
+    for (const auto& [sender, msg] : chatbot->getHistory()) {
+        appendMessage(sender, msg);
+    }
+}
+
+// main.cpp
+#include "ChatbotGUI.h"
+#include <memory>
+
+int main(int argc, char** argv) {
+    auto chatbot = std::make_unique<ChatBot>("ChatGPT Bot");
+    auto apiClient = std::make_unique<APIClient>(
+        "https://api.openai.com/v1/chat/completions",
+        "YOUR_API_KEY_HERE"
+    );
+    chatbot->setAPIClient(std::move(apiClient));
+
+    ChatbotGUI gui(700, 600, "C++ ChatGPT GUI Bot");
+    gui.setChatbot(std::move(chatbot));
+    gui.show();
+
+    return Fl::run();
+}
+
+// CMakeLists.txt
+cmake_minimum_required(VERSION 3.10)
+project(CPPChatbot)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+find_package(CURL REQUIRED)
+find_package(FLTK REQUIRED)
+
+include_directories(${CURL_INCLUDE_DIRS})
+include_directories(${FLTK_INCLUDE_DIRS})
+
+set(SOURCES
+    main.cpp
+    ChatBot.cpp
+    APIClient.cpp
+    ChatbotGUI.cpp
+)
+
+add_executable(chatbot ${SOURCES})
+
+target_link_libraries(chatbot
+    ${CURL_LIBRARIES}
+    ${FLTK_LIBRARIES}
+)
